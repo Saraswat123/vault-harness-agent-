@@ -1,0 +1,6 @@
+{
+  "dependencies": ["."],
+  "graphs": { "vault_harness": "./vault_harness/graph.py:graph" },
+  "env": ".env",
+  "python_version": "3.11"
+}

@@ -1,0 +1,15 @@
+.venv/
+.env
+*.pem
+token*.json
+credentials.json
+oauth_*.json
+sheets_config.json
+CLAUDE.local.md
+.langgraph_api/
+state/
+output/
+__pycache__/
+.pytest_cache/
+*.egg-info/
+*.log
