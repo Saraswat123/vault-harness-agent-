@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from vault_harness import policy as _policy
+from vault_harness import webauthn as W
 from vault_harness.policy import Intent
 
 PLACEHOLDER_TTL = 600
@@ -37,6 +38,15 @@ _RAW = serialization.Encoding.Raw, serialization.PublicFormat.Raw
 
 def bind(i: Intent) -> str:
     return hashlib.sha256(json.dumps([i.merchant, i.amount_cents, i.currency], sort_keys=True).encode()).hexdigest()
+
+
+def approval_challenge(i: Intent, nonce: str) -> bytes:
+    """What the passkey signs to approve ONE payment: bound to merchant+amount+currency and a one-time nonce."""
+    return hashlib.sha256(f"approve:{bind(i)}:{nonce}".encode()).digest()
+
+
+def lift_challenge(scope: str, nonce: str) -> bytes:
+    return hashlib.sha256(f"lift:{scope}:{nonce}".encode()).digest()
 
 
 def approval_message(i: Intent, token: str) -> bytes:
@@ -106,13 +116,15 @@ def load_or_create_key(path, passphrase: str) -> X25519PrivateKey:
 
 class MockEnclave:
     def __init__(self, *, user_pub: bytes, policy_pub: bytes, processor: Callable[[dict], dict],
-                 auto_limit_cents: int = 500, max_single_cents: int = 2000, allowed_hosts=("api.stripe.com",), allowed_paths=None, key_file=None, passphrase=None):
+                 auto_limit_cents: int = 500, max_single_cents: int = 2000, allowed_hosts=("api.stripe.com",), allowed_paths=None, key_file=None, passphrase=None,
+                 webauthn_origin="http://localhost:8765", webauthn_rp_id="localhost"):
         self.__sk = load_or_create_key(key_file, passphrase) if key_file else X25519PrivateKey.generate()
         self._pub = self.__sk.public_key().public_bytes(*_RAW)
         self._signers = {"user": Ed25519PublicKey.from_public_bytes(user_pub), "policy": Ed25519PublicKey.from_public_bytes(policy_pub)}
         self._processor, self._auto, self._cap, self._hosts = processor, auto_limit_cents, max_single_cents, tuple(allowed_hosts)
         self._paths = tuple(allowed_paths) if allowed_paths else None      # e.g. only /v1/payment_methods may ever receive the real card
         self._ph = {}                                      # token -> {number, bind, exp, used}
+        self._wa_origin, self._wa_rp, self._passkey = webauthn_origin, webauthn_rp_id, None     # passkey: {x, y, counter}
         self._boxes_used = set()                              # one-time CVC nonces already consumed (browser-sealed CVC boxes)
         self._revoked, self._nonces = set(), set()         # scopes: all | card:<id> | merchant:<host>; changed only by USER-signed commands
 
@@ -140,8 +152,33 @@ class MockEnclave:
     def revoke(self, scope: str, nonce: str, sig: str):
         self._cmd("revoke", scope, nonce, sig); self._revoked.add(scope)
 
-    def lift(self, scope: str, nonce: str, sig: str):
-        self._cmd("lift", scope, nonce, sig); self._revoked.discard(scope)
+    def register_passkey(self, x: bytes, y: bytes) -> str:
+        """Trust-on-first-use in this mock. In the real build the passkey public key must arrive over the attested channel (or be baked into the image)."""
+        if self._passkey:
+            raise EnclaveRefused("a passkey is already registered")
+        self._passkey = {"x": x, "y": y, "counter": 0}
+        return hashlib.sha256(x + y).hexdigest()[:16]
+
+    def _check_passkey(self, challenge: bytes, approval: dict, once_key: str):
+        wa, nonce = approval.get("webauthn"), approval.get("nonce")
+        if not wa or not nonce:
+            raise EnclaveRefused("a passkey approval (Touch ID) is required")
+        if once_key in self._boxes_used:
+            raise EnclaveRefused("approval already used")
+        try:
+            new = W.verify_assertion(self._passkey["x"], self._passkey["y"], bytes.fromhex(wa["authenticator_data"]), bytes.fromhex(wa["client_data_json"]),
+                                     bytes.fromhex(wa["signature"]), challenge, self._wa_origin, self._wa_rp, self._passkey["counter"])
+        except (W.WebAuthnError, KeyError, ValueError) as e:
+            raise EnclaveRefused(f"passkey approval invalid: {e}")
+        self._passkey["counter"] = new
+        self._boxes_used.add(once_key)
+
+    def lift(self, scope: str, nonce: str, sig: str, webauthn: dict = None):
+        if self._passkey:                                   # with a passkey registered, lifting a freeze needs Touch ID: the host cannot do it alone
+            self._check_passkey(lift_challenge(scope, nonce), {"webauthn": webauthn, "nonce": nonce}, f"lift:{nonce}")
+        else:
+            self._cmd("lift", scope, nonce, sig)
+        self._revoked.discard(scope)
 
     def enroll(self, sealed: dict, card_id: str) -> dict:
         """Open a sealed card once, validate it, return DISPLAY fields only. The host stores the sealed box; the enclave stores nothing."""
@@ -202,10 +239,13 @@ class MockEnclave:
             raise EnclaveRefused("unknown signer")
         if signer == "policy" and i.amount_cents >= self._auto:
             raise EnclaveRefused("at or above the auto-approve limit the USER must sign")
-        try:
-            self._signers[signer].verify(bytes.fromhex(approval.get("sig", "")), approval_message(i, ph.token))
-        except (InvalidSignature, ValueError):
-            raise EnclaveRefused("approval signature invalid")
+        if signer == "user" and self._passkey:             # a human approval must be a Touch ID / passkey assertion for THIS payment
+            self._check_passkey(approval_challenge(i, str(approval.get("nonce", ""))), approval, f"appr:{approval.get('nonce')}")
+        else:
+            try:
+                self._signers[signer].verify(bytes.fromhex(approval.get("sig", "")), approval_message(i, ph.token))
+            except (InvalidSignature, ValueError):
+                raise EnclaveRefused("approval signature invalid")
         u = urlparse(req.get("url", ""))
         if u.scheme != "https" or u.hostname not in self._hosts:
             raise EnclaveRefused(f"processor host {u.hostname!r} not allowed")   # a captured request to evil.example would receive the real card

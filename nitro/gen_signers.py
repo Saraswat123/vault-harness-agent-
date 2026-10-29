@@ -28,7 +28,7 @@ def main():
     user, policy = load_or_create("user"), load_or_create("policy")
     cfg = {"user_pub": user.public_key().public_bytes(*RAW_PUB).hex(), "policy_pub": policy.public_key().public_bytes(*RAW_PUB).hex(),
            "auto_limit_cents": pol["auto_approve_under_cents"], "max_single_cents": pol["max_single_cents"],
-           "allowed_hosts": ["api.stripe.com"], "allowed_paths": ["/v1/payment_methods"]}
+           "allowed_hosts": ["api.stripe.com"], "allowed_paths": ["/v1/payment_methods"], "webauthn_origin": "http://localhost:8765", "webauthn_rp_id": "localhost"}
     (ROOT / "nitro" / "enclave_config.json").write_text(json.dumps(cfg, indent=2) + "\n")
     print("signers in", SIG, "| wrote nitro/enclave_config.json (public keys + limits only)")
 

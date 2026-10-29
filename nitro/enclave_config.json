@@ -8,5 +8,7 @@
   ],
   "allowed_paths": [
     "/v1/payment_methods"
-  ]
+  ],
+  "webauthn_origin": "http://localhost:8765",
+  "webauthn_rp_id": "localhost"
 }

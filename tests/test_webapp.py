@@ -230,3 +230,95 @@ def test_a_freeze_still_stops_an_agent_that_holds_a_mandate(web):
     call("POST", "/api/freeze", {"scope": "all", "reason": "stop"})
     assert call("POST", "/api/agent/pay", {})[0] == 200
     assert wait_idle(call)["results"][-1]["outcome"] == "denied" and call("GET", "/api/state")[1]["counter_cents"] == 0
+
+
+# ---------------- passkey through the web app ----------------
+from tests.webauthn_soft import SoftAuthenticator  # noqa: E402
+from vault_harness.webauthn import b64u, unb64u  # noqa: E402
+
+
+def register(app, call):
+    a = SoftAuthenticator(origin=app.origin)
+    o = call("GET", "/api/passkey/options")[1]
+    obj, cd = a.register(unb64u(o["challenge"]))
+    return a, call("POST", "/api/passkey/register", {"attestationObject": b64u(obj), "clientDataJSON": b64u(cd)})
+
+
+def assertion(a, ch):
+    s = a.assert_(unb64u(ch["challenge"]))
+    return {"authenticatorData": b64u(s["authenticator_data"]), "clientDataJSON": b64u(s["client_data_json"]), "signature": b64u(s["signature"])}
+
+
+def test_passkey_registers_once_and_the_state_says_so(web):
+    app, call = web
+    assert call("GET", "/api/state")[1]["passkey"]["registered"] is False
+    a, (code, _) = register(app, call)
+    assert code == 200 and call("GET", "/api/state")[1]["passkey"]["registered"] is True
+    assert call("POST", "/api/passkey/register", {"attestationObject": "", "clientDataJSON": ""})[0] == 400            # a second registration is refused
+
+
+def test_registration_from_another_site_is_refused(web):
+    app, call = web
+    a = SoftAuthenticator(origin="http://evil.example")
+    o = call("GET", "/api/passkey/options")[1]
+    obj, cd = a.register(unb64u(o["challenge"]))
+    code, out = call("POST", "/api/passkey/register", {"attestationObject": b64u(obj), "clientDataJSON": b64u(cd)})
+    assert code == 400 and "origin" in out["error"]
+
+
+def wait_approval(call):
+    for _ in range(100):
+        if call("GET", "/api/state")[1]["approval"]:
+            return
+        time.sleep(0.1)
+    raise AssertionError("no approval requested")
+
+
+def test_with_a_passkey_a_plain_approve_click_is_refused_and_touch_id_approves(web):
+    app, call = web
+    a, _ = register(app, call)
+    cid, _ = enroll_python(app, call)
+    call("POST", "/api/pay", pay_body(app, call, cid, cents=200))
+    wait_approval(call)
+    assert call("POST", "/api/approve", {"decision": "approve"})[0] == 400                                               # a button alone no longer works
+    ch = call("GET", "/api/approval-challenge")[1]
+    assert call("POST", "/api/approve", {"decision": "approve", "nonce": "wrong", "assertion": assertion(a, ch)})[0] == 400   # wrong nonce
+    other = SoftAuthenticator(origin=app.origin)
+    assert call("POST", "/api/approve", {"decision": "approve", "nonce": ch["nonce"], "assertion": assertion(other, ch)})[0] == 400   # another device
+    assert call("POST", "/api/approve", {"decision": "approve", "nonce": ch["nonce"], "assertion": assertion(a, ch)})[0] == 200
+    s = wait_idle(call)
+    assert s["results"][0]["outcome"] == "done"
+
+
+def test_a_rejection_never_needs_touch_id(web):
+    app, call = web
+    register(app, call)
+    cid, _ = enroll_python(app, call)
+    call("POST", "/api/pay", pay_body(app, call, cid, cents=200))
+    wait_approval(call)
+    assert call("POST", "/api/approve", {"decision": "reject"})[0] == 200                                                 # stopping is always easy
+    assert wait_idle(call)["results"][0]["outcome"] == "stopped"
+
+
+def test_lifting_a_freeze_needs_touch_id_once_a_passkey_exists(web):
+    app, call = web
+    a, _ = register(app, call)
+    call("POST", "/api/freeze", {"scope": "all", "reason": "t"})
+    assert call("POST", "/api/lift", {"scope": "all"})[0] == 400                                                          # no fingerprint, still frozen
+    assert call("GET", "/api/state")[1]["freezes"]
+    ch = call("GET", "/api/lift-challenge?scope=all")[1]
+    assert call("POST", "/api/lift", {"scope": "all", "nonce": ch["nonce"], "assertion": assertion(a, ch)})[0] == 200
+    assert call("GET", "/api/state")[1]["freezes"] == []
+
+
+def test_authorizing_the_agent_needs_touch_id_over_those_exact_terms(web):
+    app, call = web
+    a, _ = register(app, call)
+    cid, _ = enroll_python(app, call)
+    body = mandate_body(app, call, cid, n=2)
+    assert call("POST", "/api/mandate", body)[0] == 400                                                                  # no fingerprint
+    ch = call("POST", "/api/mandate-challenge", body)[1]
+    good = {**body, "assertion": assertion(a, ch)}
+    tampered = {**body, "count": 3, "assertion": assertion(a, ch)}                                                       # more payments than were approved
+    assert call("POST", "/api/mandate", tampered)[0] == 400
+    assert call("POST", "/api/mandate", good)[0] == 200

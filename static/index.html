@@ -32,7 +32,7 @@
 <body>
 <header>
   <h1>Vault Harness</h1><span class="chip">stateless Kernel browser</span><span class="chip" id="encChip">enclave: …</span>
-  <span class="chip money">REAL MONEY: $1.00 per payment</span><span id="counter" class="chip"></span>
+  <span class="chip" id="paChip">approvals: software stand-in</span><span class="chip money">REAL MONEY: $1.00 per payment</span><span id="counter" class="chip"></span>
 </header>
 <main>
   <div>
@@ -69,6 +69,12 @@
       <button id="agentPay" disabled>Let the agent pay now ($1.00)</button> <button class="danger" id="mRevoke">Revoke authorization</button>
     </section>
     <section>
+      <h2>Touch ID / passkey</h2>
+      <p class="note">Until you set this up, "Approve" is just a button. With a passkey, every human approval, every freeze lift and every authorization of the agent needs <b>your fingerprint or Face ID</b>, signed for that exact action, and the enclave checks it too.</p>
+      <div id="hostWarn" class="bad note" hidden>Open this page at <b>http://localhost:8765</b> (not 127.0.0.1): passkeys only work on a real hostname.</div>
+      <button class="primary" id="pkSetup">Set up Touch ID</button> <span id="pkState" class="note"></span>
+    </section>
+    <section>
       <h2>Brakes</h2>
       <p class="note">Instant revocation. Checked before every decision, again just before the payment, and inside the enclave.</p>
       <button class="danger" id="frz">Freeze everything</button> <button id="lift">Lift freeze</button>
@@ -96,6 +102,25 @@ const $ = (id) => document.getElementById(id);
 const api = async (path, body) => {
   const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Harness": "1" }, body: JSON.stringify(body) });
   const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j;
+};
+const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64u = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+let pk = false;                                                           // is a passkey registered?
+if (location.hostname !== "localhost") $("hostWarn").hidden = false;
+async function touch(ch) {                                                // asks Touch ID / Face ID to sign THIS challenge
+  const a = await navigator.credentials.get({ publicKey: { challenge: unb64u(ch.challenge), rpId: ch.rp_id, userVerification: "required", timeout: 60000,
+    allowCredentials: [{ type: "public-key", id: unb64u(ch.credential_id) }] } });
+  return { authenticatorData: b64u(a.response.authenticatorData), clientDataJSON: b64u(a.response.clientDataJSON), signature: b64u(a.response.signature) };
+}
+$("pkSetup").onclick = async () => {
+  try {
+    const o = await api("/api/passkey/options");
+    const c = await navigator.credentials.create({ publicKey: { challenge: unb64u(o.challenge), rp: o.rp, user: { id: unb64u(o.user.id), name: o.user.name, displayName: o.user.displayName },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }], authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "preferred" },
+      attestation: "none", timeout: 60000 } });
+    await api("/api/passkey/register", { attestationObject: b64u(c.response.attestationObject), clientDataJSON: b64u(c.response.clientDataJSON) });
+    $("pkState").textContent = "";
+  } catch (err) { $("pkState").textContent = err.message; }
 };
 let cardId = "";
 const KEEP = ["em", "nm", "ad", "ci", "st", "co", "zp"];                       // billing details only: never the card number, expiry or CVC
@@ -141,8 +166,10 @@ $("authBtn").onclick = async () => {
     const att = await api("/api/attest"); const { nonces } = await api(`/api/nonces?n=${n}`);
     const boxes = []; for (const x of nonces) boxes.push(await seal(att.pubkey, { cvc }, "cvc-nonce:" + x));
     $("mcv").value = "";
-    await api("/api/mandate", { card_id: cardId, count: n, minutes: +$("mm").value, cents: 100, confirm: $("mcf").value.trim(), nonces, cvc_boxes: boxes,
-      billing: { email: $("em").value.trim(), name: $("nm").value.trim(), country: $("co").value.trim().toUpperCase(), address: $("ad").value.trim(), city: $("ci").value.trim(), state: $("st").value.trim(), zip: $("zp").value.trim() } });
+    const body = { card_id: cardId, count: n, minutes: +$("mm").value, cents: 100, confirm: $("mcf").value.trim(), nonces, cvc_boxes: boxes,
+      billing: { email: $("em").value.trim(), name: $("nm").value.trim(), country: $("co").value.trim().toUpperCase(), address: $("ad").value.trim(), city: $("ci").value.trim(), state: $("st").value.trim(), zip: $("zp").value.trim() } };
+    if (pk) body.assertion = await touch(await api("/api/mandate-challenge", body));      // Touch ID over these exact terms
+    await api("/api/mandate", body);
     $("mcf").value = "";
   } catch (err) { $("mErr").textContent = err.message; }
   $("authBtn").disabled = false;
@@ -150,8 +177,20 @@ $("authBtn").onclick = async () => {
 $("agentPay").onclick = async () => { try { await api("/api/agent/pay", {}); $("mErr").textContent = ""; } catch (err) { $("mErr").textContent = err.message; } };
 $("mRevoke").onclick = () => api("/api/mandate/revoke", {});
 $("frz").onclick = () => api("/api/freeze", { scope: "all", reason: "web app" });
-$("lift").onclick = () => api("/api/lift", { scope: "all" });
-$("ap").onclick = () => api("/api/approve", { decision: "approve" });
+$("lift").onclick = async () => {
+  try {
+    if (!pk) return await api("/api/lift", { scope: "all" });
+    const ch = await api("/api/lift-challenge?scope=all");
+    await api("/api/lift", { scope: "all", nonce: ch.nonce, assertion: await touch(ch) });
+  } catch (err) { $("frozen").textContent = err.message; }
+};
+$("ap").onclick = async () => {
+  try {
+    if (!pk) return await api("/api/approve", { decision: "approve" });
+    const ch = await api("/api/approval-challenge");                                  // bound to this payment's merchant, amount and a one-time nonce
+    await api("/api/approve", { decision: "approve", nonce: ch.nonce, assertion: await touch(ch) });
+  } catch (err) { $("why").textContent = err.message; }
+};
 $("rj").onclick = () => api("/api/approve", { decision: "reject" });
 const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
 let liveSet = "";
@@ -161,6 +200,9 @@ async function tick() {
     if (!cardId && s.cards.length) { cardId = s.cards[0].id; $("cardId").value = cardId; $("cardInfo").innerHTML = `On file: <b>${s.cards[0].brand} •••• ${s.cards[0].last4}</b> (restored; ciphertext only).`; }
     $("counter").textContent = `spent ${s.counter_cents / 100} of ${s.budget_cents / 100} USD`;
     $("encChip").textContent = "enclave: " + s.enclave.mode + (s.enclave.pcr0 ? " · PCR0 " + s.enclave.pcr0.slice(0, 12) + "…" : "");
+    pk = s.passkey.registered;
+    $("paChip").textContent = pk ? "approvals: Touch ID (passkey), checked in the enclave" : "approvals: software stand-in";
+    $("pkSetup").disabled = pk; $("pkState").textContent = pk ? "registered for this session" : $("pkState").textContent;
     $("payBtn").disabled = s.running;
     const m = s.mandate; $("agentPay").disabled = !m || s.running;
     $("mState").textContent = m ? `ACTIVE: the agent may pay ${m.remaining} more of ${m.of} × $${m.cents / 100} on •••• ${m.last4}, until ${new Date(m.expires_at * 1000).toLocaleTimeString()}.` : "No active authorization."; $("log").innerHTML = esc(s.log.join("\n")); $("log").scrollTop = 1e9;

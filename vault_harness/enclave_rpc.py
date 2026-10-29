@@ -79,7 +79,9 @@ class EnclaveServer:
                 if op == "revoke":
                     self.enc.revoke(a["scope"], a["nonce"], a["sig"]); return {"ok": True, "result": None}
                 if op == "lift":
-                    self.enc.lift(a["scope"], a["nonce"], a["sig"]); return {"ok": True, "result": None}
+                    self.enc.lift(a["scope"], a["nonce"], a.get("sig", ""), a.get("webauthn")); return {"ok": True, "result": None}
+                if op == "register_passkey":
+                    return {"ok": True, "result": self.enc.register_passkey(bytes.fromhex(a["x"]), bytes.fromhex(a["y"]))}
             return {"ok": False, "error": "unknown_op", "message": str(op)[:40]}
         except E.EnclaveRefused as e:
             return {"ok": False, "error": "EnclaveRefused", "message": str(e)}
@@ -152,5 +154,8 @@ class EnclaveClient:
     def revoke(self, scope, nonce, sig):
         self._call("revoke", scope=scope, nonce=nonce, sig=sig)
 
-    def lift(self, scope, nonce, sig):
-        self._call("lift", scope=scope, nonce=nonce, sig=sig)
+    def lift(self, scope, nonce, sig="", webauthn=None):
+        self._call("lift", scope=scope, nonce=nonce, sig=sig, webauthn=webauthn)
+
+    def register_passkey(self, x: bytes, y: bytes) -> str:
+        return self._call("register_passkey", x=x.hex(), y=y.hex())

@@ -25,6 +25,8 @@ class EnclaveVault:
         self._enc, self._user, self._pol = enclave, user_key, policy_key
         self._card, self._browser, self._page, self._auto = card_source, make_browser, make_page, auto_limit_cents
         self._store, self._card_id, self._frz, self._pushed = card_store, card_id, freezes, set()
+        self.user_approval = None                                    # {'webauthn': {...hex}, 'nonce': str} from the owner's passkey, for ONE payment
+        self.lift_assertions = {}                                    # scope -> {'webauthn': {...}, 'nonce': str}: the owner's Touch ID for lifting a freeze
         self._cvc = cvc_source                                       # asked per payment; the CVC is never stored
 
     def __repr__(self):
@@ -51,8 +53,27 @@ class EnclaveVault:
         for sc in want - self._pushed:
             self._enc.revoke(sc, *self._signed("revoke", sc))
         for sc in self._pushed - want:
-            self._enc.lift(sc, *self._signed("lift", sc))
+            la = self.lift_assertions.pop(sc, None)
+            try:
+                if la:
+                    self._enc.lift(sc, la["nonce"], "", la["webauthn"])        # passkey mode: only an assertion from the owner can lift
+                else:
+                    self._enc.lift(sc, *self._signed("lift", sc))               # software-signer mode (no passkey registered)
+            except E.EnclaveRefused:
+                want = want | {sc}                                            # the enclave kept the freeze: stay frozen, never pretend it was lifted
         self._pushed = want
+
+    def _make_approval(self, ph, intent) -> dict:
+        """The enclave's approval for this payment. The owner's passkey assertion if one was given, else the software signers."""
+        if self.user_approval:
+            ap, self.user_approval = {"signer": "user", **self.user_approval}, None
+            return ap
+        signer = "user" if intent.amount_cents >= self._auto else "policy"
+        key = self._user if signer == "user" else self._pol
+        return {"signer": signer, "sig": key.sign(E.approval_message(intent, ph.token)).hex()}
+
+    def register_passkey(self, x: bytes, y: bytes) -> str:
+        return self._enc.register_passkey(x, y)
 
     def issue_placeholder(self, intent: Intent) -> E.Placeholder:
         return self._enc.issue_placeholder(intent)
@@ -70,9 +91,7 @@ class EnclaveVault:
         cvc_sealed = None
         if self._card_id and self._cvc:
             cvc_sealed = E.seal(bytes.fromhex(self._enc.attest()["pubkey"]), {"cvc": self._cvc()}, aad=f"cvc:{ph.token}".encode())
-        signer = "user" if intent.amount_cents >= self._auto else "policy"
-        key = self._user if signer == "user" else self._pol
-        approval = {"signer": signer, "sig": key.sign(E.approval_message(intent, ph.token)).hex()}
+        approval = self._make_approval(ph, intent)
         try:
             return self._enc.pay(sealed=sealed, placeholder=ph, intent=intent, request=cap["request"], approval=approval, card_id=self._card_id, cvc_sealed=cvc_sealed)
         except E.EnclaveRefused as e:

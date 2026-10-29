@@ -18,7 +18,8 @@ def main():
     cfg = json.loads(Path(os.environ.get("VAULT_ENCLAVE_CONFIG", Path(__file__).resolve().parent / "enclave_config.json")).read_text())
     enc = E.MockEnclave(user_pub=bytes.fromhex(cfg["user_pub"]), policy_pub=bytes.fromhex(cfg["policy_pub"]), processor=ForwardProcessor(),
                         auto_limit_cents=cfg["auto_limit_cents"], max_single_cents=cfg["max_single_cents"],
-                        allowed_hosts=tuple(cfg["allowed_hosts"]), allowed_paths=tuple(cfg["allowed_paths"]))
+                        allowed_hosts=tuple(cfg["allowed_hosts"]), allowed_paths=tuple(cfg["allowed_paths"]),
+                        webauthn_origin=cfg.get("webauthn_origin", "http://localhost:8765"), webauthn_rp_id=cfg.get("webauthn_rp_id", "localhost"))
     att = None
     if os.environ.get("NITRO") == "1":
         from vault_harness import nsm

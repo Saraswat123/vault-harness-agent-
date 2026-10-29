@@ -160,9 +160,7 @@ class HostedCheckoutVault(EnclaveVault):
 
     def pay(self, ph: E.Placeholder, intent: Intent) -> dict:
         self.sync_revocations()
-        signer = "user" if intent.amount_cents >= self._auto else "policy"
-        key = self._user if signer == "user" else self._pol
-        approval = {"signer": signer, "sig": key.sign(E.approval_message(intent, ph.token)).hex()}
+        approval = self._make_approval(ph, intent)
         sealed = self._store.sealed(self._card_id)
         cvc_sealed, cvc_aad = None, None
         if self._cvc_boxes:

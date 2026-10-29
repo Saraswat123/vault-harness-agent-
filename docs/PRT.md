@@ -1,6 +1,6 @@
 # PRT — Guarded Agent Payments: a card vault for AI agents (Kernel + Stripe + AWS Nitro design)
 
-Status 2026-10-29. Every claim is marked **verified** (a test or a live run produced it) or **not verified / not built**. Test card only: Stripe's public `4242 4242 4242 4242`.
+Status 2026-10-30. Every claim is marked **verified** (a test or a live run produced it) or **not verified / not built**. Sandbox tests use Stripe's public test card `4242 4242 4242 4242` (no real money). The real-card payments in §3b use the company's test card on the company's live $1.00 link; those are real $1.00 charges.
 
 ---
 
@@ -57,7 +57,7 @@ Base `https://api.agentcard.sh`; sandbox vs production is decided by the credent
 | 1 | Request arrives; any card-like digits are redacted before entering state | `start()` | no |
 | 2 | Agent proposes `{merchant, amount_cents, currency}`; unknown fields rejected | model | no |
 | 3 | Freeze check → policy → velocity caps → risk score → **auto / human / deny** | `guard.py` | no |
-| 4 | Human approval when required (software stand-in for a passkey today) | graph pause | no |
+| 4 | Human approval when required: a **Touch ID passkey assertion** bound to this payment once a passkey is registered (§3d), otherwise a software stand-in | graph pause, enclave | no |
 | 5 | Enclave issues a one-time placeholder bound to merchant+amount+currency | `enclave.py` | no |
 | 6 | Fresh Kernel browser opens checkout; code reads the page total; types the placeholder; the request is captured; session deleted | `browser.py` | no |
 | 7 | Page total must equal the approved amount | `enclave_vault.py` | no |
@@ -70,6 +70,7 @@ Base `https://api.agentcard.sh`; sandbox vs production is decided by the credent
 
 ## 3b. The real checkout: Perflo Pay $1 link (Stripe Checkout)
 Findings from inspecting and rehearsing against the real link (2026-10-29), **nothing was paid**:
+
 - The page is "Perflo Pay — Test Product — $1.00". Its checkout session ids start with `cs_live_`: **it is live mode, so a payment is a real $1.00 charge.** The card fields have stable ids (`cardNumber`, `cardExpiry`, `cardCvc`, `billingName`, …); an hCaptcha frame is present; a headless browser never rendered it, a headful one does.
 - Stripe Checkout sends the card to `POST api.stripe.com/v1/payment_methods` when Pay is pressed. That is the "tokenization request" in Agentcard's description, and it is where the swap happens.
 - **Adaptive pricing** can show the price in the visitor's local currency (£0.78, SGD 1.33 seen from the cloud browser). The driver selects USD and, as a backstop, refuses to continue unless the page total equals the approved amount. In rehearsal this check stopped a run that would otherwise have approved $1.00 against a £0.78 page.
@@ -80,10 +81,10 @@ Findings from inspecting and rehearsing against the real link (2026-10-29), **no
 |---|---|
 | Rehearsal on the real link, `--capture-only`: placeholder typed, request intercepted, **aborted, nothing sent to Stripe** | **6 of 8 runs captured the request** with the placeholder present and no real card; the other 2 stopped safely (page total mismatch before the currency fix; one page-load timeout) |
 | Same code, local stand-in checkout, **Stripe test mode**, real Kernel browser: interception → swap → real PaymentMethod → success | **passed** (live test) |
-| Real card on the real link (company's Mastercard •••• 4034, $1.00 each) | **5 payments completed**, run by the card owner in their own terminal; see the table below |
+| Real card on the real link (company's Mastercard •••• 4034, $1.00 each) | **7 payments completed** (5 from the terminal runner, 2 from the web app), run by the card owner; see the table below |
 
 
-**Real payments on the company's card (live mode, $1.00 each, 2026-10-29).** The card owner typed the card at hidden prompts; the assistant never saw it. Per the runner's output (the browser reached the success page and Stripe created the PaymentMethod):
+**Real payments on the company's card (live mode, $1.00 each, 2026-10-29).** The card owner entered the card (hidden terminal prompts for #1–5; the encrypting web page for #6–7); the assistant never saw it. Per the runner's output (the browser reached the success page and Stripe created the PaymentMethod):
 
 | # | PaymentMethod id | last4 |
 |---|---|---|
@@ -92,8 +93,10 @@ Findings from inspecting and rehearsing against the real link (2026-10-29), **no
 | 3 | `pm_1UVwwD2St7FgIvNdjHRhnJqR` | 4034 |
 | 4 | `pm_1UVwx12St7FgIvNdZJkyVUXb` | 4034 |
 | 5 | `pm_1UVwyq2St7FgIvNdEsFvTV56` | 4034 |
+| 6 (web app) | `pm_1UVxW72St7FgIvNdu3CPzrnv` | 4034 |
+| 7 (web app) | `pm_1UVxXu2St7FgIvNdU9Rf198v` | 4034 |
 
-**Evidence level:** runner output only. Perflo's Stripe account is not ours, so there is no API read-back. Independent confirmation is the emailed receipt and the merchant's Payments dashboard (status: *to be confirmed by the card owner and the merchant*). Counter: 500 cents.
+**Evidence level:** runner output only. Perflo's Stripe account is not ours, so there is no API read-back. Independent confirmation is the emailed receipt and the merchant's Payments dashboard (status: *to be confirmed by the card owner and the merchant*). Counter: 700 cents (7 of the $20 budget).
 
 **Problems met and fixed on the real page:** Stripe Link login codes (the email was a Link account, so the runner now stops at that screen and a fresh plus-address was used); adaptive pricing showing GBP/SGD; a dropdown for the UAE state; flaky cloud page loads; the guard escalating to a human after pre-card stops had been counted as failed payments (now recorded as `aborted`).
 
@@ -105,14 +108,23 @@ Open risks on the real page: an hCaptcha or 3-D Secure challenge needs a human i
 ---
 
 ## 3c. Web app: add a card and watch the agent pay, without a terminal
-`python webapp.py` serves `http://127.0.0.1:8765` (localhost only; refuses other hosts and cross-site posts).
+`python webapp.py` serves `http://localhost:8765` (this machine only; refuses other hosts and cross-site posts).
+
 - **Add card:** the number is encrypted **in the page** (WebCrypto: X25519 → HKDF-SHA256 → AES-256-GCM, bound to a server-issued card id) and the input is cleared; the server receives ciphertext only, shown on the page. The same sealing code, run in Node, produces a box the Python enclave opens (tested); a box for one card id is refused under another.
 - **Pay:** billing details, CVC (also encrypted in the page, one box per payment, tied to a one-time nonce the enclave consumes) and a typed `PAY` confirmation. Limits: 1–10 payments of at most $2.00.
 - **Mandate ("Autopilot"):** the owner authorizes once (1–10 payments, at most $2.00 each, valid at most 60 minutes, typed `AUTHORIZE`). The CVC is encrypted in the page into one box per authorised payment and held in **server memory only**. After that, `POST /api/agent/pay` (or the "Let the agent pay" button) takes **no card, no CVC and no billing details**; each call consumes one box, runs the same graph (freeze, policy, velocity, risk, enclave checks), and the owner can revoke at once. State never exposes the boxes. Tested: confirmation and limit checks, pay-with-no-inputs until used up, instant revoke, expiry, and a freeze still stopping an agent that holds a mandate.
 - **Trade-off, stated plainly:** pre-sealed CVC boxes are card-verification data held (encrypted, in RAM, short-lived, one-time) beyond a single authorization. PCI DSS forbids keeping a CVC after authorization even encrypted, so this is a **test-scope design**; a production system would need a processor that allows card-on-file without a CVC or a device-side step per payment.
 - **Watch:** the Kernel live view of the stateless browser, the agent's log, the results table, alerts, and a **Freeze everything / Lift** button. When the guard wants a human, an **Approve / Reject** box appears; nothing is paid while it waits.
 - **Persistence:** with a passphrase the enclave key is kept in `output/enclave_key.json` (scrypt → AES-256-GCM) and cards in `output/cards_web.json`, so cards survive restarts (tested; a wrong passphrase is refused). This is a stand-in for KMS, not production key custody. Billing details are remembered in the browser only.
-- **Limits:** the enclave is a mock; the live-view iframe depends on Kernel allowing embedding; **not yet run with a real card from the page**.
+- **Limits:** the enclave is a mock; the live-view iframe depends on Kernel allowing embedding; **run with the company's card from the page: 2 payments** (§3b), with the card encrypted in the browser.
+
+
+### 3d. Passkey approvals (Touch ID / Face ID)
+Built and tested with a **software authenticator**; the browser side (`navigator.credentials`) has **not** been exercised by the assistant and needs your Mac's Touch ID.
+
+- **Setup:** "Set up Touch ID" registers a platform passkey (ES256, user verification required). The harness verifies the registration and registers the public key **inside the enclave** (trust on first use in this mock; one passkey per session; not persisted across restarts).
+- **What it protects:** (1) every **human approval** of a payment: the owner's assertion signs a challenge bound to that payment's merchant, amount and currency plus a one-time nonce, and the **enclave** verifies it (the host's software key is refused once a passkey exists); (2) **lifting a freeze** (freezing stays easy; lifting is the dangerous direction): the host cannot lift it alone, and the vault stays frozen if the enclave refuses; (3) **authorizing the agent's mandate**: Touch ID over the exact terms (card, count, amount, minutes, nonces). Rejecting a payment never needs a fingerprint.
+- **Limits, stated plainly:** the risk step-up and the mandate limits are still enforced by the host; only the human-approval signature and the freeze lift are enforced inside the enclave. Platform authenticators may report a signature counter of 0, so replay protection rests on the challenge and one-time nonce. The page must be opened at `http://localhost:8765` (passkeys need a hostname, not an IP).
 
 ---
 
@@ -137,18 +149,19 @@ Thresholds are configuration (`config/policy.interview.json`): auto-approve unde
 
 ## 5. Stored cards: the ciphertext in detail
 **Enrolment (`EnclaveVault.enroll`).**
+
 1. The device that holds the card builds `{number, exp_month, exp_year}` (the CVC is dropped, never stored).
 2. It generates a fresh **X25519** key pair, does ECDH with the enclave's public key, and derives a 256-bit key with **HKDF-SHA256** (info = label ‖ ephemeral public key ‖ enclave public key).
 3. It encrypts with **AES-256-GCM**, a random 96-bit nonce, and the **card id as associated data**.
 4. Output: `{epk, nonce, ct, aad}`. The enclave opens it once to validate (Luhn, brand) and returns only display fields; the host stores the box plus `brand/last4/exp`.
 
-**What is on disk (`output/cards.json`, mode 600):** the box and display fields. **Not on disk:** the number in clear, the CVC, any key.
+**What is on disk (`output/cards*.json`, mode 600):** the box and display fields. **Not on disk:** the number in clear, the CVC, any key.
 
 **Why a stolen file is useless:** opening it needs the enclave's X25519 **private** key. The AEAD tag detects any change; the associated data binds a box to its card id, so a box for card A cannot be passed off as card B (tested); a box sealed to another enclave cannot be opened (tested).
 
 **CVC (finding).** Stripe refused a stored card without a security code ("You must collect the security code…"), and PCI DSS forbids keeping a CVC after authorization, even encrypted. So the CVC is supplied **per payment**, sealed to the enclave with the placeholder token as associated data (usable for that one payment, then discarded). Consequence: a fully unattended payment from a stored card needs either a processor that allows card-on-file without a CVC, or a device-side step that supplies it. This is a real product constraint, not solved here.
 
-**Key custody (mock vs real).** In the mock the enclave key lives in the process, so a stored box does not survive a restart. In the real build the private key is generated inside a Nitro enclave and sealed by **KMS**, released only to an enclave whose attestation (PCR values) matches; that is what makes the ciphertext durable and the host unable to read it. **Not built.**
+**Key custody (mock vs real).** In the mock the enclave key lives in the process, or in a passphrase-sealed file (§3c), a stand-in for KMS. In the real build the private key is generated inside a Nitro enclave and sealed by **KMS**, released only to an enclave whose attestation (PCR values) matches; that is what makes the ciphertext durable and the host unable to read it. **Not built.**
 
 **Per-payment mode** (card sealed at approval time, nothing stored) remains available and is tested.
 
@@ -166,25 +179,16 @@ The enclave logic now runs as a **separate program** (`vault_harness/enclave_rpc
 | Harness refuses an enclave that does not verify; the page shows "NITRO, attestation verified · PCR0 …" only then | **yes** (fail-closed test) | with real attestation |
 | Attestation fetch inside the enclave (`libnsm`) | written from the documented C API | needs `/dev/nsm`; `libnsm` build needs a **reviewed commit** (`NSM_REF`), not test-built |
 | Egress to `api.stripe.com` | forwarder tested with TCP stand-ins | vsock proxy + TLS end to end; enclave clock for certificate validation |
-| Approval | Ed25519 signatures checked inside; **the user key is still a software stand-in held by the harness** | passkey (WebAuthn) verified in the enclave |
+| Approval | **Passkey (Touch ID / Face ID) verified inside the enclave** once registered (tested with a software authenticator); Ed25519 software signers only before registration | with a real authenticator and, on Nitro, a passkey public key provisioned over the attested channel (today it is trust-on-first-use) |
 | Key persistence | passphrase-sealed key file (mock); fresh key per enclave boot | KMS key policy released only to the attested image (template written, **phase 2, not built**) |
 | Launch, setup, build, run, teardown scripts, step-by-step guide (`nitro/README.md`) | syntax-checked only | **never run**: no AWS access was available |
 
 Cost: Nitro Enclaves has no extra charge; the free-tier micro instance is not supported; an `.xlarge` is roughly USD 0.15–0.20/hour (from memory, check the live price).
 
----|---|---|
-| Isolation | none (same process) | enclave VM, no network, no persistent storage |
-| Key | in-process X25519 | generated in enclave, KMS-sealed, attestation-gated release |
-| Host link | function call | vsock only; egress via a vsock TLS proxy that cannot read the bytes |
-| Approval | Ed25519 signatures; **user key is a software stand-in held in the harness process (the weakest link)** | passkey (WebAuthn) assertion verified in the enclave; key never leaves the device |
-| Revocation | user-signed commands, replay-protected | same |
-| Zeroization | best effort (Python cannot guarantee it) | Rust/C with explicit wipe |
-| Attestation | `attest()` returns key + config hash | signed attestation document, checked by the sealing page and KMS |
-
 ---
 
 ## 7. Test results
-**Suite:** `RUN_LIVE=1 pytest -q tests` → **175 passed**, 0 failed. Offline (`pytest -q tests`): **168 passed, 7 skipped** (the skipped ones need a real Kernel browser, Docker or live keys).
+**Suite:** `RUN_LIVE=1 pytest -q tests` → **210 passed**, 0 failed. Offline (`pytest -q tests`): **203 passed, 7 skipped** (the skipped ones need a real Kernel browser, Docker or live keys).
 
 | Area | Tests | Proves |
 |---|---|---|
@@ -192,21 +196,24 @@ Cost: Nitro Enclaves has no extra charge; the free-tier micro instance is not su
 | Placeholders (`test_vault`) | 4 | single use, bound, expiring |
 | Agentcard client (`test_agentcard`) | 31 | token, errors, validation, no retry on create, reconcile (**fixtures only**) |
 | Kernel vault client (`test_kernel_vault`) | 10 | one wallet per vault, mode fails closed (fixtures; the live calls ran separately) |
-| Enclave (`test_enclave`) | 16 | swap only inside; signature, cap, host, amount checks; tamper and wrong-enclave failures |
+| Enclave (`test_enclave`) | 17 | swap only inside; signature, cap, host, amount checks; tamper and wrong-enclave failures |
 | Stateless browser (`test_browser`) | 9 (4 live) | no profile/vault/pool; deleted on every path; **live:** a fresh session sees none of another's cookies/storage; only the placeholder is typed; injected page text ignored; lying page stopped by the enclave |
 | Wiring + Stripe processor (`test_wiring`) | 11 | graph → enclave → processor; test-key-only; approved amount used; errors redacted |
-| Guard, store, leak (`test_guard`) | 29 | velocity, risk, every freeze scope, freeze after approval, enclave revocation, alerts, ciphertext store, CVC binding, scanner finds a planted card and ignores 6,000 random ids |
+| Guard, store, leak (`test_guard`) | 31 | velocity, risk, every freeze scope, freeze after approval, enclave revocation, alerts, ciphertext store, CVC binding, scanner finds a planted card and ignores 6,000 random ids |
 | Agent kernel (`test_kernel`) | 5 | ledger verifies, halt switch, post-check |
-| Web app (`test_webapp`) | 9 | host and header checks; card sealed by the browser code accepted by the enclave and refused under another id; ciphertext-only storage; pay validation; full run loop through the real graph; freeze from the page; human approval gates a payment; rejection pays nothing |
-| Hosted checkout (`test_hosted_checkout`) | 8 (1 live) | forward-mode swap with formatted card and 2-digit year; path allowlist; reply withheld if it carries card digits; header whitelist; CORS echo; Visa-shaped placeholder. **Live:** local stand-in checkout in a real Kernel browser → interception → enclave swap → **real Stripe test-mode PaymentMethod** → page success |
+| Web app (`test_webapp`) | 20 | host and header checks; card sealed by the browser code accepted by the enclave and refused under another id; ciphertext-only storage; pay validation; full run loop through the real graph; freeze from the page; human approval gates a payment; rejection pays nothing |
+| Hosted checkout (`test_hosted_checkout`) | 9 (1 live) | forward-mode swap with formatted card and 2-digit year; path allowlist; reply withheld if it carries card digits; header whitelist; CORS echo; Visa-shaped placeholder. **Live:** local stand-in checkout in a real Kernel browser → interception → enclave swap → **real Stripe test-mode PaymentMethod** → page success |
 | Enclave as a separate program (`test_enclave_rpc`) | 5 | full payment across a real socket with **no card number on the wire**; refusals and user-signed revocation cross the channel; errors never leak request contents; the attestation nonce reaches the enclave and a failing verifier makes `attest` fail closed |
 | Attestation verifier (`test_attestation`) | 9 | a genuine **synthetic** document verifies; rejected: wrong image (PCR0), tampered bytes, untrusted CA, expired certificate, wrong public key, replayed nonce, stale timestamp, debug-mode zero PCRs, garbage. **Not yet tried on a real AWS document** |
 | Packaged enclave image (`test_nitro_local`, live) | 2 | the 259 MB image runs as a container; the harness attests, enrolls and revokes over the socket; a real Kernel browser pays through it into a **real Stripe test-mode PaymentMethod**; the container log holds no card number |
+| Passkey core (`test_webauthn`) | 17 | WebAuthn ES256 registration and assertion verified: accepted; rejected when the biometric (user-verification) flag is missing, for another origin or relying party, for a different action (challenge), from another device, with a tampered signature, or with a rolled-back counter. **Software authenticator only** |
+| Passkey in the enclave (`test_passkey_enclave`) | 12 | once a passkey is registered the enclave accepts a human approval **only** as a Touch ID assertion bound to that payment's merchant, amount and a one-time nonce; the software user key is refused; a different amount, a replay, another device and a missing biometric are refused; the host cannot lift a freeze, the owner's Touch ID can; works across the socket and through the vault adapter; if the enclave refuses a lift the vault stays frozen |
 | Eval gate (`test_eval`) | 2 | no metric below baseline |
 
 **Golden eval** (`evals/run_eval.py`, **36 cases**: 10 control, 20 attack, 6 leak): control no-false-alarm **100%**, attack no-miss **100%**, leak outcomes **100%**, card number found in state/result/ledger: **0**. The eval was checked by breaking things: with redaction off, leak cases fell to 67%; with allowlist/cap/budget off, attacks fell to 42%. During the build it also caught a real miss (card-testing burst scored too low to force a human); the engine was fixed, the case was not edited.
 
 **Live Stripe sandbox payments (test mode, test card, every one read back from Stripe):** **18 of 18 reconciled** (amount, currency, `succeeded`, `livemode:false`).
+
 - Payments 1–10, per-payment card entry: `pi_3UVqcjKCp4CjFk8l0thalE2G`, `pi_3UVqd7KCp4CjFk8l0LToagT8`, `pi_3UVqdDKCp4CjFk8l0iNX3kIZ`, `pi_3UVqdJKCp4CjFk8l08jaUYnb`, `pi_3UVqdOKCp4CjFk8l0C1weEnk`, `pi_3UVqdUKCp4CjFk8l1DidkIXm`, `pi_3UVqdZKCp4CjFk8l0nDsCMSg`, `pi_3UVqdfKCp4CjFk8l1V5Ka3qV`, `pi_3UVqdlKCp4CjFk8l0k2tfzk8`, `pi_3UVqdrKCp4CjFk8l0VFxOd9J`.
 - Payments 11–13, **card enrolled once as ciphertext**, per-payment sealed CVC: `pi_3UVsc8KCp4CjFk8l1LDVmkMH`, `pi_3UVscEKCp4CjFk8l1xZZqLdG`, `pi_3UVscJKCp4CjFk8l0z0mL7l3`.
 - Payments 14–18, a second run with a freshly enrolled ciphertext card, after all final changes: `pi_3UVuw2KCp4CjFk8l16UPDzU3`, `pi_3UVuw7KCp4CjFk8l04u4mIB4`, `pi_3UVuwDKCp4CjFk8l08kyVwSt`, `pi_3UVuwIKCp4CjFk8l0JzBKaCx`, `pi_3UVuwOKCp4CjFk8l0imTTMTN`.
@@ -221,11 +228,12 @@ Cost: Nitro Enclaves has no extra charge; the free-tier micro instance is not su
 ---
 
 ## 8. Not verified / not built
+
 - **Real AWS Nitro Enclave**: vsock, a real attestation document, KMS key release and the Stripe vsock proxy were prepared (§6, `nitro/`) but **never run on AWS**. Locally the enclave is a separate containerised program with no hardware isolation.
-- **Passkey (Face ID / Touch ID) approval.** Approval is a software stand-in; the user signing key lives in the harness process.
+- **A real Touch ID run.** Passkey approvals are implemented and tested against a software authenticator (§3d); the browser ceremony itself has not been run on a real device. Before registration, approvals fall back to the software signer.
 - **Attestation in the sealing page.** The page encrypts to the enclave's public key, but with a mock enclave there is no attestation document for it to verify.
 - **Agentcard live API** (no builder credentials) and the vendor's payment through the swap (stopped before the click).
-- **A real-card payment on the Perflo link.** Built and rehearsed (§3b) but **not executed by the assistant**; it needs the card owner at a terminal. The sandbox Stripe processor still refuses live keys by design. The company's test card was enrolled in Agentcard's wallet only.
+- **Independent confirmation of the real-card payments.** Seven $1.00 payments were run by the card owner (§3b), never by the assistant; the evidence is the harness output. The receipts and the merchant's dashboard have not yet been confirmed. The sandbox Stripe processor still refuses live keys by design.
 - **Webhook alert delivery** (the sink exists; no receiver was tested). No SMS/email alerting.
 - **Process-memory, swap and core-dump leakage.** The scanner reads files only; memory safety is a property of the real enclave, not tested here.
 - **LLM quality.** The model is a scripted writer, so the eval scores the guardrails and plumbing, not model behaviour.

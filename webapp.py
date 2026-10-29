@@ -32,6 +32,9 @@ from langgraph.types import Command  # noqa: E402
 
 from vault_harness import actions, alerts, guard, policy  # noqa: E402
 from vault_harness import enclave as E  # noqa: E402
+from vault_harness import webauthn as W  # noqa: E402
+from vault_harness.policy import Intent  # noqa: E402
+import hashlib  # noqa: E402
 from vault_harness.cardstore import CardStore  # noqa: E402
 from vault_harness.fake_model import ScriptedWriter  # noqa: E402
 from vault_harness.graph import build, start  # noqa: E402
@@ -73,6 +76,9 @@ class App:
         self.issued, self.lock = set(), threading.Lock()
         self.s = {"running": False, "log": [], "results": [], "approval": None, "started": 0.0}
         self._decision, self._decision_evt = None, threading.Event()
+        self.origin, self.rp_id = "http://localhost:8765", "localhost"
+        self.passkey, self._reg_challenge, self._pending, self._approval_intent, self._vault = None, None, None, None, None
+        self.lift_assertions, self._lift_pending = {}, {}
         self.mandate = None                              # in MEMORY only: {card_id, billing, boxes[(nonce, box)], cents, expires_at, last4}
         self.vault_factory = vault_factory or self._real_vault
 
@@ -98,11 +104,76 @@ class App:
             snap = {**self.s, "log": list(self.s["log"]), "results": list(self.s["results"])}
         return {**snap, "live": self.live_url() if snap["running"] else None, "freezes": guard.Freezes().active(),
                 "cards": self.store.list_display(), "counter_cents": policy.Budget().spent(), "budget_cents": self.pol.budget_total_cents,
-                "alerts": alerts.read()[-12:], "mandate": self._mandate_public(), "enclave": {"mode": self.mode, "pcr0": self.pcr0}}
+                "alerts": alerts.read()[-12:], "mandate": self._mandate_public(), "passkey": {"registered": bool(self.passkey)}, "enclave": {"mode": self.mode, "pcr0": self.pcr0}}
 
     def _mandate_public(self):
         m = self._live_mandate() if self.mandate else None
         return {"remaining": len(m["boxes"]), "of": m["n"], "cents": m["cents"], "expires_at": m["expires_at"], "last4": m["last4"]} if m else None
+
+
+    # ---------- passkey (Touch ID / Face ID) ----------
+    def set_origin(self, origin: str):
+        self.origin = origin
+        if hasattr(self.enc, "_wa_origin"):
+            self.enc._wa_origin = origin                       # in-process enclave; a remote enclave has it baked into its config
+
+    def passkey_options(self) -> dict:
+        self._reg_challenge = secrets.token_bytes(32)
+        return {"challenge": W.b64u(self._reg_challenge), "rp": {"id": self.rp_id, "name": "Vault Harness"},
+                "user": {"id": W.b64u(secrets.token_bytes(16)), "name": "owner", "displayName": "Owner"}, "registered": bool(self.passkey)}
+
+    def passkey_register(self, b: dict) -> dict:
+        if self.passkey:
+            raise ValueError("a passkey is already registered for this session")
+        if not self._reg_challenge:
+            raise ValueError("ask for registration options first")
+        try:
+            r = W.parse_registration(W.unb64u(b["attestationObject"]), W.unb64u(b["clientDataJSON"]), self._reg_challenge, self.origin, self.rp_id)
+        except W.WebAuthnError as e:
+            raise ValueError(f"passkey registration refused: {e}")
+        self.enc.register_passkey(r["x"], r["y"])                  # the ENCLAVE now trusts this key for human approvals
+        self.passkey = {"cred_id": r["credential_id"], "x": r["x"], "y": r["y"], "counter": 0}
+        self._reg_challenge = None
+        alerts.emit("passkey_registered", "warn")
+        self.say("Touch ID passkey registered: human approvals now need your fingerprint, and the enclave checks it.")
+        return {"ok": True}
+
+    def _verify_host(self, assertion: dict, challenge: bytes) -> dict:
+        """Host-side check of an assertion (the enclave checks it again). Returns the hex form the enclave expects."""
+        try:
+            ad, cd, sig = W.unb64u(assertion["authenticatorData"]), W.unb64u(assertion["clientDataJSON"]), W.unb64u(assertion["signature"])
+            self.passkey["counter"] = W.verify_assertion(self.passkey["x"], self.passkey["y"], ad, cd, sig, challenge, self.origin, self.rp_id, self.passkey["counter"])
+        except (W.WebAuthnError, KeyError, ValueError) as e:
+            raise ValueError(f"Touch ID approval refused: {e}")
+        return {"authenticator_data": ad.hex(), "client_data_json": cd.hex(), "signature": sig.hex()}
+
+    def _cred(self) -> dict:
+        return {"credential_id": W.b64u(self.passkey["cred_id"]), "rp_id": self.rp_id}
+
+    def approval_challenge(self) -> dict:
+        if not self.passkey:
+            raise ValueError("no passkey registered")
+        if not self.s["approval"] or not self._approval_intent:
+            raise ValueError("nothing is waiting for approval")
+        self._pending = secrets.token_hex(12)
+        return {"challenge": W.b64u(E.approval_challenge(Intent(**self._approval_intent), self._pending)), "nonce": self._pending, **self._cred()}
+
+    def lift_challenge(self, scope: str) -> dict:
+        if not self.passkey:
+            raise ValueError("no passkey registered")
+        self._lift_pending[scope] = secrets.token_hex(12)
+        return {"challenge": W.b64u(E.lift_challenge(scope, self._lift_pending[scope])), "nonce": self._lift_pending[scope], **self._cred()}
+
+    @staticmethod
+    def _mandate_terms(b: dict) -> bytes:
+        t = {k: b.get(k) for k in ("card_id", "count", "cents", "minutes")}
+        t["nonces"] = list(b.get("nonces", []))
+        return hashlib.sha256(("mandate:" + json.dumps(t, sort_keys=True)).encode()).digest()
+
+    def mandate_challenge(self, b: dict) -> dict:
+        if not self.passkey:
+            raise ValueError("no passkey registered")
+        return {"challenge": W.b64u(self._mandate_terms(b)), **self._cred()}
 
     # ---------- API ----------
     def attest(self):
@@ -126,10 +197,22 @@ class App:
         guard.Freezes().freeze(scope, reason or "web app"); alerts.emit("freeze_set", "critical", scope=scope, reason=reason or "")
         self.say(f"FROZEN: {scope}")
 
-    def lift(self, scope: str):
+    def lift(self, scope: str, assertion=None, nonce=None):
+        if self.passkey:                                       # lifting a freeze is the dangerous direction: it needs the owner's fingerprint
+            if not assertion or not nonce or self._lift_pending.get(scope) != nonce:
+                raise ValueError("Touch ID is required to lift a freeze")
+            self.lift_assertions[scope] = {"nonce": nonce, "webauthn": self._verify_host(assertion, E.lift_challenge(scope, nonce))}
+            self._lift_pending.pop(scope, None)
         guard.Freezes().lift(scope); alerts.emit("freeze_lifted", "warn", scope=scope); self.say(f"lifted: {scope}")
 
-    def decide(self, decision: str):
+    def decide(self, decision: str, assertion=None, nonce=None):
+        if decision == "approve" and self.passkey:
+            if not assertion or not nonce or nonce != self._pending:
+                raise ValueError("Touch ID approval is required (ask for an approval challenge first)")
+            hexed = self._verify_host(assertion, E.approval_challenge(Intent(**self._approval_intent), nonce))
+            self._pending = None                                # one assertion, one payment
+            if self._vault is not None:
+                self._vault.user_approval = {"nonce": nonce, "webauthn": hexed}      # the enclave verifies it again
         self._decision = "approve" if decision == "approve" else "reject"
         self._decision_evt.set()
 
@@ -170,6 +253,10 @@ class App:
         card = next((c for c in self.store.list_display() if c["id"] == b.get("card_id")), None)
         if not card:
             raise ValueError("unknown card id: add a card first")
+        if self.passkey:                                       # authorising an agent to spend is a human decision: Touch ID over these exact terms
+            if not b.get("assertion"):
+                raise ValueError("Touch ID is required to authorize the agent")
+            self._verify_host(b["assertion"], self._mandate_terms(b))
         nonces, boxes = b.get("nonces", []), b.get("cvc_boxes", [])
         if len(nonces) != n or len(boxes) != n or any(x not in self.issued for x in nonces):
             raise ValueError("one issued nonce and one sealed CVC per authorised payment are required")
@@ -214,6 +301,11 @@ class App:
                 aad = f"cvc-nonce:{nonces[i]}"
                 vault = self.vault_factory(card_id=card_id, billing=bill, cvc_box_provider=lambda b=boxes[i], a=aad: (b, a))
                 actions.use(vault)
+                self._vault = vault
+                try:
+                    vault.lift_assertions = self.lift_assertions
+                except Exception:
+                    pass
                 g, cfg = build(MemorySaver(), ScriptedWriter(drafts=[draft])), {"configurable": {"thread_id": f"web-{n}-{secrets.token_hex(3)}"}}
                 self.say(f"#{n}: the agent proposes ${cents/100:.2f} to buy.stripe.com (it has no card; it will get a placeholder)")
                 try:
@@ -223,6 +315,7 @@ class App:
                     self._add(n, "halted", "-", "-"); return
                 st = g.get_state(cfg).values
                 if any(t.interrupts for t in g.get_state(cfg).tasks):
+                    self._approval_intent = st["intent"]
                     with self.lock:
                         self.s["approval"] = st["verdict"]["reasons"]
                     self.say(f"#{n}: the guard wants a human: {st['verdict']['reasons']}")
@@ -274,6 +367,10 @@ def make_handler(app: App, port: int):
             if path == "/api/attest": return self._send(200, app.attest())
             if path == "/api/new-card-id": return self._send(200, {"card_id": app.new_card_id()})
             if path == "/api/state": return self._send(200, app.state())
+            if path == "/api/passkey/options": return self._send(200, app.passkey_options())
+            if path == "/api/approval-challenge": return self._send(200, app.approval_challenge())
+            if path == "/api/lift-challenge":
+                return self._send(200, app.lift_challenge((self.path.split("scope=")[1] if "scope=" in self.path else "all").split("&")[0]))
             if path == "/api/nonces":
                 n = int((self.path.split("n=")[1] if "n=" in self.path else "1").split("&")[0]); return self._send(200, {"nonces": app.nonces(n)})
             self._send(404, {"error": "not found"})
@@ -291,9 +388,11 @@ def make_handler(app: App, port: int):
                 if path == "/api/mandate": return self._send(200, app.authorize(b))
                 if path == "/api/mandate/revoke": app.revoke_mandate(); return self._send(200, {"ok": True})
                 if path == "/api/agent/pay": return self._send(200, app.agent_pay())
-                if path == "/api/approve": app.decide(b.get("decision", "reject")); return self._send(200, {"ok": True})
+                if path == "/api/passkey/register": return self._send(200, app.passkey_register(b))
+                if path == "/api/mandate-challenge": return self._send(200, app.mandate_challenge(b))
+                if path == "/api/approve": app.decide(b.get("decision", "reject"), b.get("assertion"), b.get("nonce")); return self._send(200, {"ok": True})
                 if path == "/api/freeze": app.freeze(b.get("scope", "all"), b.get("reason", "")); return self._send(200, {"ok": True})
-                if path == "/api/lift": app.lift(b.get("scope", "all")); return self._send(200, {"ok": True})
+                if path == "/api/lift": app.lift(b.get("scope", "all"), b.get("assertion"), b.get("nonce")); return self._send(200, {"ok": True})
                 self._send(404, {"error": "not found"})
             except (ValueError, KeyError, E.EnclaveRefused) as e:
                 self._send(400, {"error": str(e)[:300]})
@@ -308,9 +407,10 @@ def serve(port=8765, app=None, open_browser=True):
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port))
     port = srv.server_address[1]
     srv.RequestHandlerClass = make_handler(app, port)
+    app.set_origin(f"http://localhost:{port}")
     if open_browser:
-        threading.Timer(0.8, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
-    print(f"vault harness web app on http://127.0.0.1:{port}  (Ctrl+C to stop)")
+        threading.Timer(0.8, lambda: webbrowser.open(f"http://localhost:{port}")).start()
+    print(f"vault harness web app on http://localhost:{port}  (open THIS address: Touch ID passkeys do not work on 127.0.0.1)  (Ctrl+C to stop)")
     return srv, app
 
 
