@@ -7,14 +7,17 @@ from vault_harness import actions, kernel_setup
 from vault_harness.fake_model import ScriptedWriter
 from vault_harness.graph import build
 
-GOOD = "A short, clean draft."
+GOOD = '{"merchant": "buy.stripe.com", "amount_cents": 5000, "currency": "usd"}'
 CFG = {"configurable": {"thread_id": "t"}}
 
 
 @pytest.fixture(autouse=True)
 def out_dir(tmp_path, monkeypatch):
-    monkeypatch.setattr(actions, "OUT_DIR", tmp_path / "out")
-    return tmp_path / "out"
+    from vault_harness import policy
+    monkeypatch.setattr(policy, "BUDGET_FILE", tmp_path / "budget.json")
+    monkeypatch.setenv("VAULT", "mock")
+    actions.reset()
+    return tmp_path / "budget.json"
 
 
 def start(live=False, drafts=(GOOD,)):
@@ -52,7 +55,7 @@ def test_halt_between_approval_and_action_prevents_the_action(out_dir):
 def test_an_action_that_claims_done_but_did_not_is_caught_and_cannot_be_retried(out_dir, monkeypatch):
     from agent_kernel import Halted, PostconditionFailed
     calls = []
-    monkeypatch.setattr(actions, "perform", lambda text, dry_run=True: calls.append(1) or {"status": "done", "path": "/nonexistent/x"})
+    monkeypatch.setattr(actions, "perform", lambda i, dry_run=True: calls.append(1) or {"status": "done", "charge_id": "ch_x", "merchant": "buy.stripe.com", "amount_cents": 1, "currency": "usd"})
     g, _ = start(live=True)
     with pytest.raises(PostconditionFailed):
         g.invoke(Command(resume={"decision": "approve"}), CFG)

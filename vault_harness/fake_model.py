@@ -3,7 +3,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-DEFAULT_DRAFT = "This is the offline draft. Replace the script, or set a model key in .env."
+DEFAULT_DRAFT = '{"merchant": "buy.stripe.com", "amount_cents": 100, "currency": "usd", "description": "1 dollar test"}'
 
 
 class ScriptedWriter(BaseChatModel):

@@ -1,0 +1,8 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {"Sid": "AccountAdmin", "Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::ACCOUNT_ID:root"}, "Action": ["kms:Create*", "kms:Describe*", "kms:Enable*", "kms:List*", "kms:Put*", "kms:Update*", "kms:Revoke*", "kms:Disable*", "kms:Get*", "kms:ScheduleKeyDeletion", "kms:CancelKeyDeletion"], "Resource": "*"},
+    {"Sid": "EnclaveOnlyDecrypt", "Effect": "Allow", "Principal": {"AWS": "arn:aws:iam::ACCOUNT_ID:role/vault-enclave-role"}, "Action": ["kms:Decrypt", "kms:GenerateDataKey"], "Resource": "*",
+     "Condition": {"StringEqualsIgnoreCase": {"kms:RecipientAttestation:ImageSha384": "PCR0_FROM_nitro_pcrs_json"}}}
+  ]
+}

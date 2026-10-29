@@ -1,0 +1,3 @@
+# Only the processor may be reached from the enclave. Anything else is refused by the proxy.
+allowlist:
+- {address: api.stripe.com, port: 443}

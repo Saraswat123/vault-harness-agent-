@@ -1,0 +1,25 @@
+{
+  "auto_approve_under_cents": 200,
+  "max_single_cents": 2000,
+  "budget_total_cents": 2000,
+  "allowed_merchants": [
+    "buy.stripe.com",
+    "shop.agentcard.sh",
+    "stripe-test-mode"
+  ],
+  "allowed_currencies": [
+    "usd"
+  ],
+  "velocity": {
+    "per_minute": 12,
+    "per_hour": 30,
+    "per_day": 60,
+    "spend_per_hour_cents": 2000,
+    "spend_per_day_cents": 2000
+  },
+  "risk": {
+    "step_up_at": 40,
+    "deny_at": 70,
+    "burst_count": 20
+  }
+}

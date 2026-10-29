@@ -1,0 +1,23 @@
+# The image for the REAL enclave (build it ON the x86 EC2 instance; nitro/build.sh uses this one). Adds libnsm so the enclave can fetch attestation.
+# Build context = repository root.
+#
+# SUPPLY CHAIN: libnsm is built from AWS's open-source repo. It will NOT build from "whatever is latest": you must pass a specific commit you have
+# reviewed, so the enclave's PCR0 depends on code you chose.    docker build --build-arg NSM_REF=<commit-sha> -f nitro/Dockerfile.nitro ...
+FROM rust:1-slim AS nsm
+ARG NSM_REF=""
+RUN test -n "$NSM_REF" || (echo "ERROR: set --build-arg NSM_REF=<reviewed commit of aws/aws-nitro-enclaves-nsm-api>" && false)
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN git init /nsm && cd /nsm && git remote add origin https://github.com/aws/aws-nitro-enclaves-nsm-api \
+    && git fetch --depth 1 origin "$NSM_REF" && git checkout FETCH_HEAD && cargo build --release -p nsm-lib
+
+FROM python:3.11-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY nitro/requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY --from=nsm /nsm/target/release/libnsm.so /usr/lib/libnsm.so
+COPY vault_harness/__init__.py vault_harness/policy.py vault_harness/enclave.py vault_harness/enclave_rpc.py vault_harness/forward.py \
+     vault_harness/vsock_forward.py vault_harness/nsm.py ./vault_harness/
+COPY nitro/enclave_main.py nitro/enclave_config.json ./
+ENV NITRO=1 VAULT_LISTEN=vsock://5005 VAULT_EGRESS=vsock://3:8443
+CMD ["python", "-u", "/app/enclave_main.py"]

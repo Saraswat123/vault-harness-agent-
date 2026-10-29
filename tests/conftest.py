@@ -21,3 +21,19 @@ def fresh_kernel(tmp_path, monkeypatch):
     kernel_setup.reset()
     yield
     kernel_setup.reset()
+
+
+@pytest.fixture(autouse=True)
+def hermetic_stripe_keys(monkeypatch):
+    """Unit tests never read real Stripe keys from .env or the environment."""
+    from vault_harness import stripe_processor
+    monkeypatch.setattr(stripe_processor, "_env", lambda name: None)
+
+
+@pytest.fixture(autouse=True)
+def isolated_guard_state(tmp_path, monkeypatch):
+    """Events DB, freezes, alerts and the card store live in each test's own tmp dir, never in the real output/."""
+    monkeypatch.setenv("VAULT_EVENTS_DB", str(tmp_path / "events.db"))
+    monkeypatch.setenv("VAULT_FREEZE_FILE", str(tmp_path / "freezes.json"))
+    monkeypatch.setenv("VAULT_ALERTS_FILE", str(tmp_path / "alerts.jsonl"))
+    monkeypatch.setenv("VAULT_CARD_STORE", str(tmp_path / "cards.json"))

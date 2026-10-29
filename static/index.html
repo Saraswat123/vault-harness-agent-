@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vault Harness</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#15181d; --mute:#5b6572; --line:#dfe3e8; --acc:#1f6feb; --ok:#1a7f37; --bad:#c62828; --warn:#9a6700; --mono:ui-monospace,Menlo,monospace; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0f1318; --card:#171c23; --ink:#e8ebef; --mute:#97a1ad; --line:#2a323c; --acc:#4c8dff; --ok:#3fb950; --bad:#f85149; --warn:#d29922; } }
+  * { box-sizing:border-box } body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,sans-serif }
+  header { padding:14px 20px; border-bottom:1px solid var(--line); display:flex; gap:12px; align-items:center; flex-wrap:wrap }
+  h1 { font-size:18px; margin:0 } .chip { font-size:12px; padding:2px 8px; border-radius:99px; border:1px solid var(--line); color:var(--mute) }
+  .chip.money { color:var(--bad); border-color:var(--bad); font-weight:600 }
+  main { display:grid; grid-template-columns: minmax(300px,380px) 1fr; gap:16px; padding:16px 20px; max-width:1400px; margin:auto }
+  @media (max-width:900px) { main { grid-template-columns:1fr } }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; margin-bottom:16px }
+  h2 { font-size:14px; margin:0 0 4px; text-transform:uppercase; letter-spacing:.04em; color:var(--mute) }
+  p.note { color:var(--mute); font-size:13px; margin:2px 0 10px }
+  label { display:block; font-size:12px; color:var(--mute); margin-top:8px }
+  input { width:100%; padding:7px 9px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--ink); font:inherit }
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:8px }
+  button { padding:8px 14px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--ink); font:inherit; cursor:pointer; margin-top:10px }
+  button.primary { background:var(--acc); color:#fff; border-color:var(--acc) } button.danger { color:var(--bad); border-color:var(--bad) }
+  button:disabled { opacity:.5; cursor:not-allowed }
+  #live { width:100%; height:420px; border:1px solid var(--line); border-radius:8px; background:#000 }
+  #log { font:12px/1.5 var(--mono); max-height:230px; overflow:auto; white-space:pre-wrap; background:var(--bg); border:1px solid var(--line); border-radius:6px; padding:8px }
+  table { width:100%; border-collapse:collapse; font-size:13px } td,th { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line) }
+  .ok { color:var(--ok) } .bad { color:var(--bad) } .warn { color:var(--warn) } .mono { font-family:var(--mono); font-size:12px; word-break:break-all }
+  #approval { display:none; border:1px solid var(--warn); border-radius:8px; padding:10px; margin-bottom:10px } #approval.on { display:block }
+</style>
+</head>
+<body>
+<header>
+  <h1>Vault Harness</h1><span class="chip">stateless Kernel browser</span><span class="chip" id="encChip">enclave: …</span>
+  <span class="chip money">REAL MONEY: $1.00 per payment</span><span id="counter" class="chip"></span>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>1 · Add card</h2>
+      <p class="note">Encrypted <b>in this page</b> to the enclave's public key. The server receives ciphertext only; the number is never typed in a terminal or sent to Claude.</p>
+      <form id="cardForm" autocomplete="off">
+        <label>Card number</label><input id="cn" inputmode="numeric" autocomplete="off" required>
+        <div class="row"><div><label>Expiry month (MM)</label><input id="cm" inputmode="numeric" maxlength="2" autocomplete="off" required></div>
+        <div><label>Expiry year (YYYY)</label><input id="cy" inputmode="numeric" maxlength="4" autocomplete="off" required></div></div>
+        <button class="primary" id="addBtn">Encrypt in browser &amp; store</button>
+      </form>
+      <div id="cardInfo" class="note"></div>
+    </section>
+    <section>
+      <h2>2 · Pay</h2>
+      <p class="note">The agent pays the Perflo Pay $1.00 link. CVC is encrypted per payment and never stored.</p>
+      <label>Card on file</label><input id="cardId" readonly placeholder="add a card first">
+      <div class="row"><div><label>Email (not a Stripe Link account)</label><input id="em"></div><div><label>Name on card</label><input id="nm"></div></div>
+      <label>Address</label><input id="ad"><div class="row"><div><label>City</label><input id="ci"></div><div><label>State</label><input id="st"></div></div>
+      <div class="row"><div><label>Country (code, e.g. AE)</label><input id="co" maxlength="2"></div><div><label>Postal code (blank if none)</label><input id="zp"></div></div>
+      <div class="row"><div><label>CVC</label><input id="cv" inputmode="numeric" maxlength="4" autocomplete="off"></div><div><label>Number of payments (1-10)</label><input id="tm" type="number" min="1" max="10" value="1"></div></div>
+      <label>Type PAY to confirm these are real payments</label><input id="cf" autocomplete="off">
+      <button class="primary" id="payBtn">Run the agent</button><div id="payErr" class="bad note"></div>
+    </section>
+    <section>
+      <h2>3 · Let the agent pay by itself</h2>
+      <p class="note">Authorize once, with limits. Then the agent pays with <b>no card, no CVC and no form</b>. Uses the billing details above. The CVC boxes are encrypted in this page and held in server memory only until they expire or are used.</p>
+      <div class="row"><div><label>Payments allowed (1-10)</label><input id="mc" type="number" min="1" max="10" value="3"></div><div><label>Valid for (minutes, max 60)</label><input id="mm" type="number" min="1" max="60" value="30"></div></div>
+      <label>CVC</label><input id="mcv" inputmode="numeric" maxlength="4" autocomplete="off">
+      <label>Type AUTHORIZE (real $1.00 payments)</label><input id="mcf" autocomplete="off">
+      <button class="primary" id="authBtn">Authorize the agent</button><div id="mErr" class="bad note"></div>
+      <div id="mState" class="note"></div>
+      <button id="agentPay" disabled>Let the agent pay now ($1.00)</button> <button class="danger" id="mRevoke">Revoke authorization</button>
+    </section>
+    <section>
+      <h2>Brakes</h2>
+      <p class="note">Instant revocation. Checked before every decision, again just before the payment, and inside the enclave.</p>
+      <button class="danger" id="frz">Freeze everything</button> <button id="lift">Lift freeze</button>
+      <div id="frozen" class="note"></div>
+    </section>
+  </div>
+  <div>
+    <section>
+      <h2>Live: the stateless browser</h2>
+      <p class="note">What the agent's browser sees. It types only a placeholder card; the real card is swapped in inside the enclave. <a id="liveLink" href="#" target="_blank" rel="noopener" hidden>Open in a new tab</a></p>
+      <iframe id="live" referrerpolicy="no-referrer" title="live browser view"></iframe>
+    </section>
+    <section>
+      <div id="approval"><b class="warn">The guard wants a human.</b> <span id="why"></span><br>
+        <button class="primary" id="ap">Approve</button> <button id="rj">Reject</button></div>
+      <h2>Results</h2><table><thead><tr><th>#</th><th>outcome</th><th>payment method</th><th>last4</th><th>note</th></tr></thead><tbody id="res"></tbody></table>
+    </section>
+    <section><h2>What the harness is doing</h2><div id="log"></div></section>
+    <section><h2>Alerts</h2><div id="alerts" class="mono"></div></section>
+  </div>
+</main>
+<script type="module">
+import { seal } from "/seal.js";
+const $ = (id) => document.getElementById(id);
+const api = async (path, body) => {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json", "X-Harness": "1" }, body: JSON.stringify(body) });
+  const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j;
+};
+let cardId = "";
+const KEEP = ["em", "nm", "ad", "ci", "st", "co", "zp"];                       // billing details only: never the card number, expiry or CVC
+try { const v = JSON.parse(localStorage.getItem("vh_billing") || "{}"); KEEP.forEach((k) => { if (v[k] !== undefined) $(k).value = v[k]; }); } catch (e) {}
+const saveBilling = () => { try { localStorage.setItem("vh_billing", JSON.stringify(Object.fromEntries(KEEP.map((k) => [k, $(k).value])))); } catch (e) {} };
+KEEP.forEach((k) => $(k).addEventListener("input", saveBilling));
+$("cardForm").onsubmit = async (e) => {
+  e.preventDefault(); $("addBtn").disabled = true;
+  try {
+    const { card_id } = await api("/api/new-card-id");
+    const att = await api("/api/attest");
+    const card = { number: $("cn").value.replace(/\D/g, ""), exp_month: +$("cm").value, exp_year: +$("cy").value };
+    const box = await seal(att.pubkey, card, card_id);
+    $("cn").value = $("cm").value = $("cy").value = "";                   // the number leaves the page the moment it is encrypted
+    const out = await api("/api/enroll", { card_id, sealed: box });
+    cardId = out.card_id; $("cardId").value = cardId;
+    $("cardInfo").innerHTML = `Stored: <b>${out.brand} •••• ${out.last4}</b>, exp ${out.exp_month}/${out.exp_year}. The server received only:<div class="mono">${box.ct.slice(0, 64)}…</div>`;
+  } catch (err) { $("cardInfo").innerHTML = `<span class="bad">${err.message}</span>`; }
+  $("addBtn").disabled = false;
+};
+$("payBtn").onclick = async () => {
+  $("payErr").textContent = ""; $("payBtn").disabled = true;
+  try {
+    const times = +$("tm").value, cvc = $("cv").value.trim();
+    if (!cardId) throw new Error("add a card first");
+    if (!/^\d{3,4}$/.test(cvc)) throw new Error("enter the CVC");
+    const att = await api("/api/attest");
+    const { nonces } = await api(`/api/nonces?n=${times}`);
+    const boxes = []; for (const n of nonces) boxes.push(await seal(att.pubkey, { cvc }, "cvc-nonce:" + n));
+    $("cv").value = "";
+    await api("/api/pay", { card_id: cardId, times, confirm: $("cf").value.trim(), nonces, cvc_boxes: boxes, cents: 100,
+      billing: { email: $("em").value.trim(), name: $("nm").value.trim(), country: $("co").value.trim().toUpperCase(), address: $("ad").value.trim(), city: $("ci").value.trim(), state: $("st").value.trim(), zip: $("zp").value.trim() } });
+    $("cf").value = "";
+  } catch (err) { $("payErr").textContent = err.message; }
+  $("payBtn").disabled = false;
+};
+$("authBtn").onclick = async () => {
+  $("mErr").textContent = ""; $("authBtn").disabled = true;
+  try {
+    const n = +$("mc").value, cvc = $("mcv").value.trim();
+    if (!cardId) throw new Error("add a card first");
+    if (!/^\d{3,4}$/.test(cvc)) throw new Error("enter the CVC");
+    const att = await api("/api/attest"); const { nonces } = await api(`/api/nonces?n=${n}`);
+    const boxes = []; for (const x of nonces) boxes.push(await seal(att.pubkey, { cvc }, "cvc-nonce:" + x));
+    $("mcv").value = "";
+    await api("/api/mandate", { card_id: cardId, count: n, minutes: +$("mm").value, cents: 100, confirm: $("mcf").value.trim(), nonces, cvc_boxes: boxes,
+      billing: { email: $("em").value.trim(), name: $("nm").value.trim(), country: $("co").value.trim().toUpperCase(), address: $("ad").value.trim(), city: $("ci").value.trim(), state: $("st").value.trim(), zip: $("zp").value.trim() } });
+    $("mcf").value = "";
+  } catch (err) { $("mErr").textContent = err.message; }
+  $("authBtn").disabled = false;
+};
+$("agentPay").onclick = async () => { try { await api("/api/agent/pay", {}); $("mErr").textContent = ""; } catch (err) { $("mErr").textContent = err.message; } };
+$("mRevoke").onclick = () => api("/api/mandate/revoke", {});
+$("frz").onclick = () => api("/api/freeze", { scope: "all", reason: "web app" });
+$("lift").onclick = () => api("/api/lift", { scope: "all" });
+$("ap").onclick = () => api("/api/approve", { decision: "approve" });
+$("rj").onclick = () => api("/api/approve", { decision: "reject" });
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+let liveSet = "";
+async function tick() {
+  try {
+    const s = await api("/api/state");
+    if (!cardId && s.cards.length) { cardId = s.cards[0].id; $("cardId").value = cardId; $("cardInfo").innerHTML = `On file: <b>${s.cards[0].brand} •••• ${s.cards[0].last4}</b> (restored; ciphertext only).`; }
+    $("counter").textContent = `spent ${s.counter_cents / 100} of ${s.budget_cents / 100} USD`;
+    $("encChip").textContent = "enclave: " + s.enclave.mode + (s.enclave.pcr0 ? " · PCR0 " + s.enclave.pcr0.slice(0, 12) + "…" : "");
+    $("payBtn").disabled = s.running;
+    const m = s.mandate; $("agentPay").disabled = !m || s.running;
+    $("mState").textContent = m ? `ACTIVE: the agent may pay ${m.remaining} more of ${m.of} × $${m.cents / 100} on •••• ${m.last4}, until ${new Date(m.expires_at * 1000).toLocaleTimeString()}.` : "No active authorization."; $("log").innerHTML = esc(s.log.join("\n")); $("log").scrollTop = 1e9;
+    $("res").innerHTML = s.results.map((r) => `<tr><td>${r.n}</td><td class="${r.outcome === "done" ? "ok" : "bad"}">${esc(r.outcome)}</td><td class="mono">${esc(r.payment_method)}</td><td>${esc(r.last4)}</td><td>${esc(r.reason || "")}</td></tr>`).join("");
+    $("approval").classList.toggle("on", !!s.approval); $("why").textContent = s.approval ? s.approval.join("; ") : "";
+    $("frozen").textContent = s.freezes.length ? "ACTIVE FREEZES: " + s.freezes.map((f) => f.scope).join(", ") : "no freezes";
+    $("alerts").innerHTML = s.alerts.map((a) => esc(`${a.severity}  ${a.kind}  ${a.reasons || a.reason || a.scope || a.charge || ""}`)).join("<br>");
+    if (s.live && s.live !== liveSet) { liveSet = s.live; $("live").src = s.live; $("liveLink").href = s.live; $("liveLink").hidden = false; }
+    if (!s.live && !s.running && liveSet) { liveSet = ""; $("live").removeAttribute("src"); $("liveLink").hidden = true; }
+  } catch (e) { /* server busy */ }
+}
+setInterval(tick, 1000); tick();
+</script>
+</body>
+</html>

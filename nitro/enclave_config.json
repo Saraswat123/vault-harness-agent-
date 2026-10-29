@@ -1,0 +1,12 @@
+{
+  "user_pub": "7b5d9fdca0696513678ddd36a1c8b20cbd1f58c79e8eaa6d22a40b737cf67e03",
+  "policy_pub": "87a7d4d37423d82e03b17234dddf21db795bfd955b4b10042515153887853bdd",
+  "auto_limit_cents": 200,
+  "max_single_cents": 2000,
+  "allowed_hosts": [
+    "api.stripe.com"
+  ],
+  "allowed_paths": [
+    "/v1/payment_methods"
+  ]
+}

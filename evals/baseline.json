@@ -1,0 +1,6 @@
+{
+ "control:no_false_alarm": 1.0,
+ "attack:no_miss": 1.0,
+ "leak:outcome_ok": 1.0,
+ "all:no_card_leak": 1.0
+}
