@@ -5,7 +5,7 @@ FAILS CLOSED: if the kernel cannot be loaded (for example in a container without
 this raises. It never falls back to running unguarded. To run unguarded ON PURPOSE set AGENT_KERNEL=off.
 
   AGENT_KERNEL=off            run without the kernel (tests of your own logic, throwaway runs)
-  AGENT_KIT_SRC=<dir>         where agent_kernel.py lives (default ~/agent-kit)
+  AGENT_KIT_SRC=<dir>         where agent_kernel.py lives (default: vendor/ in this repo)
   BLACKBOX_DIR=<dir>          ledger location (default ~/.blackbox/ledger)
   AGENT_CONTROL_DIR=<dir>     halt files (default ~/.agent-control).  Stop me:  python3 -m blackbox halt --agent vault-harness --reason "..."
 """
@@ -28,7 +28,7 @@ def get_kernel():
     if off():
         return None
     if _kernel is None:
-        kit = Path(os.environ.get("AGENT_KIT_SRC", str(Path.home() / "agent-kit")))
+        kit = Path(os.environ.get("AGENT_KIT_SRC", str(Path(__file__).resolve().parent.parent / "vendor")))      # vendored in this repo
         if kit.exists() and str(kit) not in sys.path:
             sys.path.insert(0, str(kit))
         try:

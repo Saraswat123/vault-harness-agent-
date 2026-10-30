@@ -13,3 +13,8 @@ __pycache__/
 .pytest_cache/
 *.egg-info/
 *.log
+
+# macOS and run artifacts
+.DS_Store
+**/.DS_Store
+evals/results/

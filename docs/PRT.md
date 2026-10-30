@@ -1,6 +1,6 @@
 # PRT — Guarded Agent Payments: a card vault for AI agents (Kernel + Stripe + AWS Nitro design)
 
-Status 2026-10-30. Every claim is marked **verified** (a test or a live run produced it) or **not verified / not built**. Sandbox tests use Stripe's public test card `4242 4242 4242 4242` (no real money). The real-card payments in §3b use the company's test card on the company's live $1.00 link; those are real $1.00 charges.
+Status 2026-10-30. **Review guides:** `README.md`, `docs/CREDENTIAL_ISOLATION.md`, `docs/GUARDRAILS.md` (code references generated from the source). Every claim is marked **verified** (a test or a live run produced it) or **not verified / not built**. Sandbox tests use Stripe's public test card `4242 4242 4242 4242` (no real money). The real-card payments in §3b use the company's test card on the company's live $1.00 link; those are real $1.00 charges.
 
 ---
 
@@ -96,7 +96,7 @@ Findings from inspecting and rehearsing against the real link (2026-10-29), **no
 | 6 (web app) | `pm_1UVxW72St7FgIvNdu3CPzrnv` | 4034 |
 | 7 (web app) | `pm_1UVxXu2St7FgIvNdU9Rf198v` | 4034 |
 
-**Evidence level:** runner output only. Perflo's Stripe account is not ours, so there is no API read-back. Independent confirmation is the emailed receipt and the merchant's Payments dashboard (status: *to be confirmed by the card owner and the merchant*). Counter: 700 cents (7 of the $20 budget).
+**Evidence level:** harness output **plus independent confirmation**. On 2026-10-30 the cardholder reported by email that the card statements show **seven transactions from 2026-10-29**, matching the seven payments above. Perflo's Stripe account is not ours, so there is no API read-back from our side. Counter: 700 cents (7 of the $20 budget).
 
 **Problems met and fixed on the real page:** Stripe Link login codes (the email was a Link account, so the runner now stops at that screen and a fresh plus-address was used); adaptive pricing showing GBP/SGD; a dropdown for the UAE state; flaky cloud page loads; the guard escalating to a human after pre-card stops had been counted as failed payments (now recorded as `aborted`).
 
@@ -233,7 +233,7 @@ Cost: Nitro Enclaves has no extra charge; the free-tier micro instance is not su
 - **A real Touch ID run.** Passkey approvals are implemented and tested against a software authenticator (§3d); the browser ceremony itself has not been run on a real device. Before registration, approvals fall back to the software signer.
 - **Attestation in the sealing page.** The page encrypts to the enclave's public key, but with a mock enclave there is no attestation document for it to verify.
 - **Agentcard live API** (no builder credentials) and the vendor's payment through the swap (stopped before the click).
-- **Independent confirmation of the real-card payments.** Seven $1.00 payments were run by the card owner (§3b), never by the assistant; the evidence is the harness output. The receipts and the merchant's dashboard have not yet been confirmed. The sandbox Stripe processor still refuses live keys by design.
+- **Merchant-side read-back of the real-card payments.** Seven $1.00 payments were run by the card owner (§3b) and the cardholder confirmed seven transactions on the card statement; we have no API read-back from the merchant's Stripe account. The sandbox Stripe processor still refuses live keys by design.
 - **Webhook alert delivery** (the sink exists; no receiver was tested). No SMS/email alerting.
 - **Process-memory, swap and core-dump leakage.** The scanner reads files only; memory safety is a property of the real enclave, not tested here.
 - **LLM quality.** The model is a scripted writer, so the eval scores the guardrails and plumbing, not model behaviour.
@@ -241,6 +241,7 @@ Cost: Nitro Enclaves has no extra charge; the free-tier micro instance is not su
 - **Compliance.** PCI DSS scoping, dispute handling, insurance, KYC: out of scope.
 
 ## 9. Reproduce
+(The safety kernel — halt switch, ledger, post-checks — is vendored in `vendor/`, so a fresh clone runs without any external folders; verified from a clean copy with the author's home folders hidden.)
 ```bash
 cd ~/vault-harness
 .venv/bin/python -m pytest -q tests                 # offline
