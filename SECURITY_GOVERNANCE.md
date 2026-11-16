@@ -49,6 +49,87 @@ These entries cover the requested model routing, caching, serving, RAG, fine-tun
 | Model evaluation | **Partial** | The repository documents offline scripted cases and evaluation coverage for guardrails/plumbing. This does not measure live-model answer quality or adversarial robustness. Keep model/version and evaluation results with each release. |
 | MCP servers and external tool trust | **Not applicable today** | No MCP server integration was identified in this agent. Before adding one, require explicit tool allowlists, scoped credentials, caller authorization, argument validation, approval for consequential actions, untrusted tool-result handling, and auditable request/result records. |
 
+## Detailed model and agent design record
+
+This section records the requested design checklist against the code as it exists today. Values below describe repository defaults; environment configuration can change the provider/model. Provider model limits are service specifications and can change, so verify them against the active account and model before deployment.
+
+### 1. Model and provider
+
+- **Groq provider:** supported through the OpenAI-compatible endpoint in [`vault_harness/models.py`](vault_harness/models.py).
+- **Default Groq model:** `openai/gpt-oss-120b`; `GROQ_MODEL` can override it. OpenRouter is the other configured provider and uses `nvidia/nemotron-3-super-120b-a12b:free` by default.
+- **Context window:** Groq currently lists GPT-OSS 120B with a 131,072-token context window and 65,536 maximum output tokens. These are provider/model limits, not application-enforced limits. The configured model can be overridden, so the applicable limit must be checked for that model. See [Groq's GPT-OSS 120B model page](https://console.groq.com/docs/model/openai/gpt-oss-120b).
+- **Application input/output limits:** no explicit `max_tokens`/output cap or request token ceiling was found in the model client. Provider hard limits and rate limits still apply; they do not replace application budgets.
+- **Routing/fallback:** default order is OpenRouter, then Groq when both credentials are configured; `LLM_PROVIDER` can force either. Fallback handles provider errors, not semantic task type, quality, price, or latency. No fallback model is defined within Groq itself; Groq is the fallback provider in the default chain.
+- **No keys:** `build_model` uses the caller's offline scripted model. That path is for deterministic local tests and is not a live-model substitute.
+
+### 2. Transformer and inference architecture
+
+The repository calls hosted inference APIs; it does not implement transformer layers, attention, KV memory, GPU scheduling, or model weights. At a high level, a transformer tokenizes input into token IDs, computes token representations through attention and feed-forward layers, and generates output tokens autoregressively. In decoder inference, a KV cache retains prior attention keys/values during generation so the model need not recompute the entire prefix for every next token.
+
+| Concern | Who manages it in this repository |
+|---|---|
+| Tokenization, model architecture, attention kernels, KV cache memory, accelerators, batching, serving capacity | Groq or OpenRouter provider |
+| Prompt text, selected model ID, provider order, HTTP timeout, graph attempts, parsing, business policy | Application |
+| Provider queue time, throughput, rate limits, cached-prefix usage and request token counts | Provider reports some usage/latency fields; application does not currently persist a complete inference metrics ledger |
+| User-level concurrency/backpressure, end-to-end latency SLO, cost budget, circuit breaker | Not evidenced as implemented; must be added at the service layer |
+
+Do not describe provider KV caching as an application-managed cache. Groq documents automatic prefix prompt caching for supported models, but this code does not request cache management or record cache hit/miss metrics. See [Groq prompt caching](https://console.groq.com/docs/prompt-caching).
+
+### 3. Prompt architecture
+
+- **System prompt:** `SYSTEM` in [`vault_harness/graph.py`](vault_harness/graph.py) asks for exactly one JSON purchase object and says not to include card details.
+- **User prompt:** the current task plus correction feedback from a rejected draft. Card-like digit sequences are redacted before entering the graph state.
+- **Tool descriptions:** none are passed as model tools in this flow. The payment action is application code after validation and policy checks.
+- **Conversation history:** no general multi-turn chat history is assembled for the model; the workflow carries task, draft, and retry feedback. A graph checkpointer may persist workflow state, but that is not a designed summarization/compression system.
+- **Context compression:** not implemented. Keep large LMS records out of prompts; fetch only authorized fields and summarize with provenance if a future product needs it.
+- **Prompt versioning:** no dedicated prompt registry/version ID was identified. The prompt is source code; use a recorded prompt revision/hash and evaluation set when changing it.
+
+### 4. Sampling and generation parameters
+
+The OpenAI-compatible client sets `temperature=0.3`, `max_retries=1`, and a timeout from `LLM_TIMEOUT_S` (default 90 seconds). No `top_p`, maximum output token value, stop sequences, or tool-choice setting is configured in the application. The structured purchase intent is intended to be stable and constrained; creative generation is not the task. Provider-side reasoning capability does not grant authority to make a payment: deterministic code controls the action.
+
+### 5. Reasoning and agent execution
+
+- **Reasoning-model behavior:** model internals/hidden reasoning are provider-managed. The application should consume only the required structured result and must not expose hidden chain-of-thought. If user-facing explanations are added, return a brief decision summary grounded in policy/tool results.
+- **Planning and tool loop:** current flow is a LangGraph state machine (`work → check → review/act/deny`); it is not an open-ended plan-and-call-tools loop. There are no model tool schemas or model-selected external tools.
+- **Maximum steps/retries:** `MAX_ATTEMPTS = 3` limits rejected intent-generation attempts in [`vault_harness/graph.py`](vault_harness/graph.py). Provider client retry is separately configured to one retry. These limits are not a universal request/deadline budget.
+- **Action authority:** only validated intent reaches deterministic policy; only the action path performs the payment side effect. Preserve this separation if the flow grows.
+
+### 6. Structured output
+
+There are no model function-call schemas configured. The model is prompted to return JSON; [`vault_harness/policy.py`](vault_harness/policy.py) parses it into the typed `Intent` contract, rejects unknown/mistyped fields and card-like data, and bounds description length. Invalid output returns corrective feedback for another attempt, up to three attempts, then fails closed. The downstream graph tracks typed state/outcomes, while action results are ordinary application data, not a generated tool-call contract. See existing cases in [`docs/GUARDRAILS.md`](docs/GUARDRAILS.md).
+
+### 7–8. Context/KV efficiency, token cost, and prompt caching
+
+Application-side context trimming, conversation summaries, tool-result compaction, and database-field selection are not implemented as a general subsystem. This payment flow sends a small task and a short schema instruction; keep it that way. If LMS support is added, fetch only fields authorized for the caller and needed for the answer, and keep results compact.
+
+No application metrics currently establish input tokens, output tokens, tool-result tokens, cost per request/task, or cache hit rate. Groq's service may automatically cache matching prompt prefixes for supported models; its documentation describes exact-prefix matching and usage fields such as cached token counts. Treat this as provider-managed behavior and explicitly capture usage metadata before claiming cost or cache optimization. Use stable system instructions and tool schemas before per-request data to improve the chance of prefix matches, while keeping tenant-specific/private data isolated and never relying on cache behavior for authorization.
+
+### 9. Hallucination and grounding controls for an LMS agent
+
+The current repository is a payment-agent project, not an LMS integration. It has no LMS connector, campus/role model, or live LMS source of truth. Therefore the following are **requirements for a future LMS agent**, not implemented controls:
+
+- Never guess live LMS data such as grades, enrollment, attendance, deadlines, or course counts; query an authorized source for current values.
+- Apply role, user, campus, course, and record-level authorization before retrieval, not only in the prompt. Do not let model-generated filters expand access.
+- Return “I don’t know” or ask for clarification when data is absent, stale, conflicting, or unauthorized.
+- Preserve source identity, record timestamp/version, and retrieval provenance; cite the data used when appropriate.
+- Validate the final response against tool results and permissions; a successful tool call is not by itself proof the response is complete or correctly scoped.
+- Add negative tests for unauthorized cross-role/campus/tenant access and prompt injection embedded in LMS content.
+
+### 10. Evaluation and reliability
+
+Existing offline evaluation cases cover payment guardrails and scripted attacks, not LMS task quality or live model behavior. Before launch of an LMS assistant, build an approved, de-identified golden dataset and track at minimum: task completion, tool-selection accuracy, argument accuracy, unsupported-claim/hallucination rate, unauthorized-data access attempts, latency p50/p95, retry rate, and failure rate. Define pass thresholds and owners before deployment. Report results by model, prompt, tool, and dataset version; include regression cases for each incident. Do not use aggregate success rate to hide security-critical failures.
+
+### 11–12. Fine-tuning, QLoRA, and distillation
+
+No training or fine-tuning pipeline exists in this repository. Consider fine-tuning only after representative evaluation data shows a repeatable gap and prompt, retrieval, or tool changes have been assessed. Use approved instruction examples, remove or protect personal/sensitive data, separate training and validation sets, document licenses and provenance, and evaluate safety/regressions before release. QLoRA requires a separately hosted fine-tuned model and serving path; it does not modify the Groq-hosted `openai/gpt-oss-120b` model.
+
+For distillation, a stronger teacher may draft examples, but filter them and require human review before training. Compare student quality, security, cost, and latency against the baseline. Keep security-sensitive decisions deterministic in application policy rather than relying on fine-tuned model behavior.
+
+### 13. Auto-agent learning and change control
+
+The agent does not autonomously train on user feedback or modify its own prompts/tools. A safe future improvement loop should store feedback and failed tasks under a retention/access policy, convert them into reviewed examples, version prompts and tool definitions, run regression and security evaluations, and promote changes only after an authorized reviewer approves them. Production agents must not self-modify prompts, policies, tools, or model routing without controlled review and rollback.
+
 ## Security threat areas and operating requirements
 
 | Threat area | Current control/evidence | Remaining requirement |
