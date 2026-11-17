@@ -161,6 +161,17 @@ Before adding RAG, MCP, vLLM, caching, or fine-tuning, document the data flows a
 
 ## Verification record
 
-This record was assembled by inspecting the current source and existing repository documentation on **2026-11-16**. Test names and evaluation cases are cited as existing evidence; no claim is made that they were executed as part of this documentation change. The repository itself records important non-production boundaries, including the mock/non-hardware enclave, software-authenticator-only passkey tests, and unauthenticated local endpoint. See [`docs/PRT.md`](docs/PRT.md) and [`docs/CREDENTIAL_ISOLATION.md`](docs/CREDENTIAL_ISOLATION.md).
+This record was assembled by inspecting the current source and existing repository documentation on **2026-11-16**, then updated with an execution run on **2026-11-17**. The repository itself records important non-production boundaries, including the mock/non-hardware enclave, software-authenticator-only passkey tests, and unauthenticated local endpoint. See [`docs/PRT.md`](docs/PRT.md) and [`docs/CREDENTIAL_ISOLATION.md`](docs/CREDENTIAL_ISOLATION.md).
+
+### Test and evaluation run (2026-11-17)
+
+Commands run from the repository root using the checked-in virtual environment:
+
+| Command | Result | Notes |
+|---|---|---|
+| `.venv/bin/python -m pytest -q tests` | **194 passed, 7 skipped, 23 errors, 2 failed**; exit code 1 | The errors and failures were in socket-dependent tests. The restricted workspace denied localhost socket binding with `PermissionError: [Errno 1] Operation not permitted` in `listen_tcp` and the web-app test fixture. This is an environment limitation; those cases are **not verified as passing** by this run. |
+| `.venv/bin/python evals/run_eval.py` | **36/36 cases passed**; regression gate: **ok** | Reported metrics: no false alarms 100%, attack no-miss 100%, leak outcome OK 100%, no card leak 100%. This uses the repository's scripted/offline evaluation and does not establish live-model behavior. |
+
+The evaluation pass is evidence for the offline scripted cases only. The partial pytest result must not be summarized as a fully passing suite. The localhost-bound tests should be rerun in an environment that permits loopback sockets to complete verification.
 
 Re-review this file whenever model providers, tools, retrieval sources, payment actions, secrets, deployment boundaries, or data retention behavior change.
